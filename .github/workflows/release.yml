@@ -1,0 +1,92 @@
+# RunMeCpp —— 打 tag 并发布 Release（附 x64 / Win32 两个 exe）
+#
+# 两种触发方式：
+#   1) 手动触发（Actions → Release → Run workflow，填版本号如 v1.0.0）
+#      流程：构建 + 测试 → 打 tag 并推送 → 创建 Release
+#   2) 本地推 tag： git tag v1.0.0 && git push origin v1.0.0
+#      流程：构建 + 测试 → 创建 Release（tag 已存在，跳过打 tag）
+#
+# 构建与测试直接复用 build.yml，测试全绿才会发版（release 依赖 build 通过）。
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号，形如 v1.0.0（会创建同名 tag；已存在则失败）'
+        required: true
+        type: string
+      prerelease:
+        description: '标记为预发布（pre-release）'
+        required: false
+        type: boolean
+        default: false
+  push:
+    tags: [ 'v*' ]
+
+permissions:
+  contents: read
+
+jobs:
+  # 复用 CI：x64/Win32 × Release/Debug 全量构建，并跑两套端到端测试
+  build:
+    uses: ./.github/workflows/build.yml
+
+  release:
+    name: Release ${{ inputs.version || github.ref_name }}
+    needs: [ build ]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write          # 打 tag / 建 Release 需要写权限
+
+    steps:
+      - name: Resolve version
+        id: ver
+        env:
+          EVENT: ${{ github.event_name }}
+          IN_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$EVENT" = "workflow_dispatch" ]; then V="$IN_VERSION"; else V="$REF_NAME"; fi
+          case "$V" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::版本号必须形如 v1.0.0，当前是 '$V'"; exit 1 ;;
+          esac
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "即将发布: $V"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # --generate-notes 需要完整历史来找上一个 release
+
+      # 手动触发时由流水线打 tag；推 tag 触发时它已经存在，跳过
+      - name: Create and push tag
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          V: ${{ steps.ver.outputs.version }}
+        run: |
+          git tag "$V"
+          git push origin "$V"
+
+      # 只取 Release 配置的两个平台的 exe（Debug 产物不发布）
+      - name: Download exe artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: 'RunMeCpp-*-Release'
+          merge-multiple: true
+          path: dist
+
+      - name: Show assets
+        run: ls -l dist
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ steps.ver.outputs.version }}
+          PRE: ${{ inputs.prerelease }}
+        run: |
+          args=(--title "$V" --generate-notes)
+          if [ "$PRE" = "true" ]; then args+=(--prerelease); fi
+          gh release create "$V" dist/*.exe "${args[@]}"
+          gh release view "$V" --json tagName,name,isPrerelease,assets

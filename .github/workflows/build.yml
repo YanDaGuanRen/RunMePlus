@@ -12,6 +12,8 @@ on:
   pull_request:
     branches: [ "master" ]
   workflow_dispatch:
+  # 供 release.yml 复用：发版前先跑同一套构建 + 测试
+  workflow_call:
 
 permissions:
   contents: read
@@ -74,9 +76,16 @@ jobs:
           $log | Where-Object { "$_".StartsWith('[FAIL]') } | ForEach-Object { "::error::$_" }
           if ($LASTEXITCODE -ne 0) { throw "run-tests-extra.ps1 failed (exit $LASTEXITCODE)" }
 
+      # 统一改成 RunMeCpp-<平台>-<配置>.exe，这样发版时两个平台的 exe 不会重名
+      - name: Stage artifact
+        shell: pwsh
+        run: |
+          New-Item dist -ItemType Directory -Force | Out-Null
+          Copy-Item '${{ steps.loc.outputs.exe }}' 'dist/RunMeCpp-${{ matrix.platform }}-${{ matrix.configuration }}.exe'
+
       - name: Upload exe artifact
         uses: actions/upload-artifact@v4
         with:
           name: RunMeCpp-${{ matrix.platform }}-${{ matrix.configuration }}
-          path: ${{ steps.loc.outputs.exe }}
+          path: dist/RunMeCpp-${{ matrix.platform }}-${{ matrix.configuration }}.exe
           if-no-files-found: error
