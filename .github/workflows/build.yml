@@ -1,0 +1,79 @@
+# RunMeCpp —— 构建 + 端到端测试流水线（Windows / MSBuild）
+#
+# 为什么不用 CMake 多平台模板：
+#   本项目是 Win32 C++ 程序（main.cpp 直接 include <windows.h> / <shellapi.h>），
+#   只能在 Windows 上编译；ubuntu-latest 上的 gcc/clang 必然失败。
+#   工程本身也是 MSBuild（RunMeCpp.sln / RunMeCpp.vcxproj），直接用 msbuild 即可。
+name: Build & Test (Windows)
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.platform }} · ${{ matrix.configuration }}
+    runs-on: windows-latest
+
+    strategy:
+      # 矩阵组合全部跑完再给结论，便于一次性看到 4 个配置的结果
+      fail-fast: false
+      matrix:
+        # 平台名必须用解决方案里的 Win32（不是 x86），与 .sln 的解决方案平台一致
+        platform: [ x64, Win32 ]
+        configuration: [ Release, Debug ]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build
+        run: >
+          msbuild RunMeCpp.sln /m /nologo /v:minimal
+          /p:Configuration=${{ matrix.configuration }}
+          /p:Platform=${{ matrix.platform }}
+
+      # x64 产物在 bin\<Config>\，Win32 产物在 bin\Win32\<Config>\（见 RunMeCpp.vcxproj 的 OutDir）
+      - name: Locate output exe
+        id: loc
+        shell: pwsh
+        run: |
+          $exe = if ('${{ matrix.platform }}' -eq 'Win32') {
+            'bin/Win32/${{ matrix.configuration }}/RunMeCpp.exe'
+          } else {
+            'bin/${{ matrix.configuration }}/RunMeCpp.exe'
+          }
+          if (-not (Test-Path $exe)) { throw "build output not found: $exe" }
+          "exe=$exe" >> $env:GITHUB_OUTPUT
+          Get-Item $exe | Select-Object FullName, Length
+
+      # 两个脚本都以 exit <失败数> 结束，失败会直接让流水线变红
+      - name: Test — smoke (29 cases)
+        shell: powershell
+        run: >-
+          powershell -NoProfile -ExecutionPolicy Bypass
+          -File docs\run-tests.ps1
+          -Exe ${{ steps.loc.outputs.exe }}
+
+      - name: Test — extended (6 cases)
+        shell: powershell
+        run: >-
+          powershell -NoProfile -ExecutionPolicy Bypass
+          -File docs\run-tests-extra.ps1
+          -Exe ${{ steps.loc.outputs.exe }}
+
+      - name: Upload exe artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RunMeCpp-${{ matrix.platform }}-${{ matrix.configuration }}
+          path: ${{ steps.loc.outputs.exe }}
+          if-no-files-found: error
