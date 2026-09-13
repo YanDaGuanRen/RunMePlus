@@ -28,9 +28,11 @@ permissions:
   contents: read
 
 jobs:
-  # 复用 CI：x64/Win32 × Release/Debug 全量构建，并跑两套端到端测试
+  # 复用 CI，但只构建 Release：Debug 不发布，构建它纯属浪费
   build:
     uses: ./.github/workflows/build.yml
+    with:
+      configurations: '["Release"]'
 
   release:
     name: Release ${{ inputs.version || github.ref_name }}

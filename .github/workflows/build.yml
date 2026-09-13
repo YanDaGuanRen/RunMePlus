@@ -14,6 +14,12 @@ on:
   workflow_dispatch:
   # 供 release.yml 复用：发版前先跑同一套构建 + 测试
   workflow_call:
+    inputs:
+      configurations:
+        description: '要构建的配置（JSON 数组）；发版只传 ["Release"]'
+        required: false
+        type: string
+        default: '["Release","Debug"]'
 
 permissions:
   contents: read
@@ -24,12 +30,13 @@ jobs:
     runs-on: windows-latest
 
     strategy:
-      # 矩阵组合全部跑完再给结论，便于一次性看到 4 个配置的结果
+      # 矩阵组合全部跑完再给结论，便于一次性看到各个配置的结果
       fail-fast: false
       matrix:
         # 平台名必须用解决方案里的 Win32（不是 x86），与 .sln 的解决方案平台一致
         platform: [ x64, Win32 ]
-        configuration: [ Release, Debug ]
+        # push/PR 默认 Release + Debug（Debug 只作编译/测试把关）；发版时 release.yml 只传 ["Release"]
+        configuration: ${{ fromJSON(inputs.configurations || '["Release","Debug"]') }}
 
     steps:
       - name: Checkout
@@ -76,14 +83,16 @@ jobs:
           $log | Where-Object { "$_".StartsWith('[FAIL]') } | ForEach-Object { "::error::$_" }
           if ($LASTEXITCODE -ne 0) { throw "run-tests-extra.ps1 failed (exit $LASTEXITCODE)" }
 
-      # 统一改成 RunMeCpp-<平台>-<配置>.exe，这样发版时两个平台的 exe 不会重名
+      # 只上传 Release 产物：Debug 只用来把关编译与测试，exe 没有分发价值
       - name: Stage artifact
+        if: matrix.configuration == 'Release'
         shell: pwsh
         run: |
           New-Item dist -ItemType Directory -Force | Out-Null
           Copy-Item '${{ steps.loc.outputs.exe }}' 'dist/RunMeCpp-${{ matrix.platform }}-${{ matrix.configuration }}.exe'
 
       - name: Upload exe artifact
+        if: matrix.configuration == 'Release'
         uses: actions/upload-artifact@v4
         with:
           name: RunMeCpp-${{ matrix.platform }}-${{ matrix.configuration }}
