@@ -121,7 +121,10 @@ $pfLine = ''
 $pfCheck = ''
 $pfIsDir = $false
 if (Test-Path 'C:\Program Files\nodejs\node.exe') {
-    $js = "require('fs').writeFileSync('" + $pfOut + "','pf-ok')"
+    # NOTE: backslashes inside the JS string literal are escapes ('\r' becomes CR,
+    # '\t' a tab...), which mangles a Windows path - pass forward slashes instead.
+    $jsPath = $pfOut.Replace('\', '/')
+    $js = "require('fs').writeFileSync('" + $jsPath + "','pf-ok')"
     $pfLine = 'Pf=pf\nodejs\node.exe -e "' + $js + '"'
     $pfCheck = $pfOut
 } elseif (Test-Path 'C:\Program Files\dotnet\dotnet.exe') {
@@ -194,10 +197,11 @@ Add-Result '..\ with trailing-backslash base dir' ($c5 -eq 'nested-ok') ("value=
 # 6) pf\ path prefix (Program Files)
 if ($pfLine -ne '') {
     $p6 = Start-Process -FilePath (Join-Path $sandbox 'Pf.exe') -WorkingDirectory $sandbox -PassThru
-    [void]$p6.WaitForExit(10000)
+    # dotnet/node first run after a cold start can be slow on CI - allow more time
+    [void]$p6.WaitForExit(30000)
     $ok6 = $false
     $sw6 = [System.Diagnostics.Stopwatch]::StartNew()
-    while ($sw6.ElapsedMilliseconds -lt 20000 -and -not $ok6) {
+    while ($sw6.ElapsedMilliseconds -lt 45000 -and -not $ok6) {
         if ($pfIsDir) {
             if ((Test-Path $pfCheck) -and (@(Get-ChildItem $pfCheck -File -Recurse -ErrorAction SilentlyContinue).Count -gt 0)) { $ok6 = $true }
         } else {

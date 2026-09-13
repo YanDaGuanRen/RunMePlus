@@ -56,20 +56,23 @@ jobs:
           "exe=$exe" >> $env:GITHUB_OUTPUT
           Get-Item $exe | Select-Object FullName, Length
 
-      # 两个脚本都以 exit <失败数> 结束，失败会直接让流水线变红
+      # 两个脚本都以 exit <失败数> 结束，非零即让流水线变红。
+      # 同时把 [FAIL] 行打成 annotation —— 这样在 PR / API 上不用翻日志就能看到是哪个用例挂了。
       - name: Test — smoke (29 cases)
-        shell: powershell
-        run: >-
-          powershell -NoProfile -ExecutionPolicy Bypass
-          -File docs\run-tests.ps1
-          -Exe ${{ steps.loc.outputs.exe }}
+        shell: pwsh
+        run: |
+          $log = & powershell -NoProfile -ExecutionPolicy Bypass -File docs\run-tests.ps1 -Exe '${{ steps.loc.outputs.exe }}' 2>&1
+          $log | ForEach-Object { "$_" }
+          $log | Where-Object { "$_".StartsWith('[FAIL]') } | ForEach-Object { "::error::$_" }
+          if ($LASTEXITCODE -ne 0) { throw "run-tests.ps1 failed (exit $LASTEXITCODE)" }
 
       - name: Test — extended (6 cases)
-        shell: powershell
-        run: >-
-          powershell -NoProfile -ExecutionPolicy Bypass
-          -File docs\run-tests-extra.ps1
-          -Exe ${{ steps.loc.outputs.exe }}
+        shell: pwsh
+        run: |
+          $log = & powershell -NoProfile -ExecutionPolicy Bypass -File docs\run-tests-extra.ps1 -Exe '${{ steps.loc.outputs.exe }}' 2>&1
+          $log | ForEach-Object { "$_" }
+          $log | Where-Object { "$_".StartsWith('[FAIL]') } | ForEach-Object { "::error::$_" }
+          if ($LASTEXITCODE -ne 0) { throw "run-tests-extra.ps1 failed (exit $LASTEXITCODE)" }
 
       - name: Upload exe artifact
         uses: actions/upload-artifact@v4
