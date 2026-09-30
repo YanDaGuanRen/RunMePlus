@@ -267,10 +267,19 @@ $ok19 = $ok19 -and ($content19 -eq 'HELLO')
 Add-Result '{0} filled by command line arg (Pk.exe HELLO)' $ok19 ("content='$content19'")
 
 # 20) ps prefix in config
-$ok20 = (Invoke-Sync (Join-Path $sandbox 'Psx.exe') @() $sandbox) -and (Wait-File (Join-Path $sandbox 'psok.txt'))
+# powershell.exe starts slowly: poll until the file has CONTENT, otherwise we may read it
+# right after creation (empty) and fail on a slow/loaded machine
+$exited20 = Invoke-Sync (Join-Path $sandbox 'Psx.exe') @() $sandbox
 $content20 = ''
-if (Test-Path (Join-Path $sandbox 'psok.txt')) { $content20 = (Get-Content (Join-Path $sandbox 'psok.txt') -Raw).Trim() }
-$ok20 = $ok20 -and ($content20 -eq 'psok')
+$sw20 = [System.Diagnostics.Stopwatch]::StartNew()
+while ($sw20.ElapsedMilliseconds -lt 15000) {
+    if (Test-Path (Join-Path $sandbox 'psok.txt')) {
+        $raw20 = Get-Content (Join-Path $sandbox 'psok.txt') -Raw -ErrorAction SilentlyContinue
+        if ($raw20) { $content20 = $raw20.Trim(); break }
+    }
+    [System.Threading.Thread]::Sleep(200)
+}
+$ok20 = $exited20 -and ($content20 -eq 'psok')
 Add-Result 'ps prefix in config (Psx.exe)' $ok20 ("content='$content20'")
 
 # 21) bare command via PATH in config (robocopy)
