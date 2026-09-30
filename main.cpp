@@ -1353,15 +1353,12 @@ static void ListLaunchSelected(bool runas)
     ListLaunchIndex((int)SendMessageW(g_listBoxWnd, LB_GETCURSEL, 0, 0), runas);
 }
 
-// 标题栏文字：原始标题 + 倒计时（倒计时已关闭/已取消时不加后缀）
-static std::wstring MakeListTitle(int sel)
+// 标题栏文字：原始标题 + 倒计时（倒计时已关闭/已取消时不加后缀；只显示剩余秒数）
+static std::wstring MakeListTitle()
 {
     std::wstring title = kListTitle;
-    if (g_listAutoRunSeconds > 0 && g_listCountdownLeft > 0 && !g_runDict.empty())
-    {
-        if (sel < 0 || sel >= (int)g_runDict.size()) sel = 0;
-        title += L"（" + std::to_wstring(g_listCountdownLeft) + L" 秒后启动 " + g_runDict[sel].name + L"）";
-    }
+    if (g_listAutoRunSeconds > 0 && g_listCountdownLeft > 0)
+        title += L"（" + std::to_wstring(g_listCountdownLeft) + L" 秒后启动）";
     return title;
 }
 
@@ -1397,7 +1394,7 @@ static void ListUpdateTitle()
     HWND main = GetParent(g_listBoxWnd);
     if (!main) return;
 
-    SetWindowTextW(main, MakeListTitle((int)SendMessageW(g_listBoxWnd, LB_GETCURSEL, 0, 0)).c_str());
+    SetWindowTextW(main, MakeListTitle().c_str());
 }
 
 // 用户开始操作（按键 / 滚轮 / 点击）→ 取消倒计时：不再自动启动，标题栏也不再显示
@@ -1592,7 +1589,7 @@ static void ShowListBox()
     int listWidth = formWidth;
     if (g_listAutoRunSeconds > 0)
     {
-        int needed = MeasureTitleWidth(MakeListTitle(0)) + 190;   // 190 ≈ 图标 + 最小化/关闭按钮 + 边框
+        int needed = MeasureTitleWidth(MakeListTitle()) + 190;   // 190 ≈ 图标 + 最小化/关闭按钮 + 边框
         if (needed > listWidth) listWidth = needed;
     }
 
@@ -1602,7 +1599,7 @@ static void ShowListBox()
     int x = wa.left + ((wa.right - wa.left) - listWidth) / 2;
     int y = wa.top + ((wa.bottom - wa.top) - height) / 2;
 
-    HWND hwnd = CreateWindowExW(0, L"RunMeListWnd", MakeListTitle(0).c_str(), WS_OVERLAPPEDWINDOW,
+    HWND hwnd = CreateWindowExW(0, L"RunMeListWnd", MakeListTitle().c_str(), WS_OVERLAPPEDWINDOW,
                                 x, y, listWidth, height, nullptr, nullptr, hinst, nullptr);
     if (!hwnd) return;
 

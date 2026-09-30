@@ -264,7 +264,7 @@ while ($sw7.ElapsedMilliseconds -lt 3000 -and $title7 -eq '' -and -not $pa.HasEx
     [System.Threading.Thread]::Sleep(100)
 }
 Add-Result 'countdown shown in title bar' ($title7 -match '\u79D2\u540E\u542F\u52A8') ("title='$title7'")
-Add-Result 'window widened so the countdown fits' ($width7 -gt 402) ("width=$width7")
+Add-Result 'list window width not below the classic 402' ($width7 -ge 402) ("width=$width7")
 
 $exited7 = $pa.WaitForExit(12000)
 $c7 = Get-FileText $au1
