@@ -386,6 +386,20 @@ Set-ItemProperty $r1 -Name IsReadOnly -Value $false
 $ok14 = ($rep2.Exit -eq 0) -and ($rep2.Text -match '\u5931\u8D25 \d+ \u9879') -and (Test-Path $r1)
 Add-Result 'runmefth reports failures instead of skipping silently' $ok14 ("exit=$($rep2.Exit) report='$($rep2.Text -replace '\r?\n', ' | ')'")
 
+# 15) help must open the custom (wide) window, not the narrow system message box
+$ph = Start-Process -FilePath (Join-Path $repDir 'RunMe.exe') -ArgumentList 'help' -WorkingDirectory $repDir -PassThru
+$swHelp = [System.Diagnostics.Stopwatch]::StartNew()
+while ($swHelp.ElapsedMilliseconds -lt 5000 -and -not $ph.HasExited -and $ph.MainWindowHandle -eq [IntPtr]::Zero) {
+    $ph.Refresh()
+    [System.Threading.Thread]::Sleep(100)
+}
+$ph.Refresh()
+$helpW = [W32]::WindowWidth($ph.MainWindowHandle)
+$helpTitle = $ph.MainWindowTitle
+if (-not $ph.HasExited) { Stop-Process -Id $ph.Id -Force -ErrorAction SilentlyContinue }
+$ok15 = ($helpW -ge 820) -and ($helpTitle -match '\u4F7F\u7528\u5E2E\u52A9')
+Add-Result 'help window is wide enough (not the narrow msgbox)' $ok15 ("width=$helpW title='$helpTitle'")
+
 # ---------------- summary ----------------
 Write-Host ''
 $results | Format-Table -AutoSize

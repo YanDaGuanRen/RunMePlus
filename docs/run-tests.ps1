@@ -210,7 +210,7 @@ Add-Result 'list txt <dir> -> list window' ($title.Length -gt 0) ("title='$title
 
 # 10) help
 $title = Invoke-CaptureTitle (Join-Path $sandbox 'RunMe.exe') @('help') $sandbox
-Add-Result 'help -> message box' ($title.Length -gt 0) ("title='$title'")
+Add-Result 'help -> help window' ($title -match '\u4F7F\u7528\u5E2E\u52A9') ("title='$title'")
 
 # 11) list on missing directory -> should show a message box, not crash
 $p = Start-Process -FilePath (Join-Path $sandbox 'RunMe.exe') -ArgumentList 'list', 'txt', 'N:\NoSuchDir' -WorkingDirectory $sandbox -PassThru

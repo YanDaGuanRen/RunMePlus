@@ -394,6 +394,28 @@ static std::wstring Join(const std::vector<std::wstring>& parts, const wchar_t* 
     return r;
 }
 
+// 把行内的 \t 展开成空格，让右列对齐到同一像素列
+// （用真实字宽测量：| … → 这些全角/歧义宽度字符按字符数估算会算错）
+static std::wstring ExpandTabs(HDC hdc, const std::wstring& line, int tabColumn)
+{
+    size_t tab = line.find(L'\t');
+    if (tab == std::wstring::npos) return line;
+
+    std::wstring left = line.substr(0, tab);
+
+    SIZE sz{};
+    int width = GetTextExtentPoint32W(hdc, left.c_str(), (int)left.size(), &sz) ? sz.cx : 0;
+
+    SIZE sp{};
+    int spaceW = GetTextExtentPoint32W(hdc, L" ", 1, &sp) ? sp.cx : 0;
+    if (spaceW <= 0) spaceW = 8;
+
+    int spaces = (tabColumn - width + spaceW - 1) / spaceW;
+    if (spaces < 1) spaces = 1;
+
+    return left + std::wstring((size_t)spaces, L' ') + line.substr(tab + 1);
+}
+
 // 生成新 GUID（对照 Guid.NewGuid().ToString()：小写、无花括号）
 static std::wstring NewGuidString()
 {
@@ -1798,44 +1820,205 @@ static void ReplaceAllX()
     ReportResult(Join(lines, L"\r\n"), L"runmefth");
 }
 
-// 显示帮助信息（对照 C# ShowMessage）
+// ============================================================================
+// 帮助窗口：自绘窗口 + 只读文本框（MessageBox 宽度不可控，长行会被挤成乱换行）
+// ============================================================================
+static HWND g_helpEdit = nullptr;
+static WNDPROC g_helpEditProc = nullptr;
+
+// 文本框子类化：Esc 关窗（Enter 不关，方便选文字）
+static LRESULT CALLBACK HelpEditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    if (msg == WM_KEYDOWN && wp == VK_ESCAPE)
+    {
+        DestroyWindow(GetParent(hwnd));
+        return 0;
+    }
+    return CallWindowProcW(g_helpEditProc, hwnd, msg, wp, lp);
+}
+
+static LRESULT CALLBACK HelpWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg)
+    {
+    case WM_SIZE:
+        if (g_helpEdit) MoveWindow(g_helpEdit, 0, 0, LOWORD(lp), HIWORD(lp), TRUE);
+        return 0;
+
+    case WM_SETFOCUS:
+        if (g_helpEdit) SetFocus(g_helpEdit);
+        return 0;
+
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+// 显示帮助：宽度按最长行自动撑开（不靠系统弹框的窄宽度），等宽字体两列对齐，
+// 超长行横向滚动而不折行
+static void ShowHelpWindow(const std::vector<std::wstring>& rawLines)
+{
+    const int tabColumn = 340;   // 右列起始像素（行内 \t 展开位置）
+
+    HINSTANCE hinst = GetModuleHandleW(nullptr);
+
+    static bool registered = false;
+    if (!registered)
+    {
+        WNDCLASSEXW wc{};
+        wc.cbSize = sizeof(wc);
+        wc.style = CS_HREDRAW | CS_VREDRAW;
+        wc.lpfnWndProc = HelpWndProc;
+        wc.hInstance = hinst;
+        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+        wc.lpszClassName = L"RunMeHelpWnd";
+        if (!RegisterClassExW(&wc))
+        {
+            ShowMessageBox(Join(rawLines, L"\r\n"), L"使用帮助");
+            return;
+        }
+        registered = true;
+    }
+
+    // 新宋体：中英文都等宽，两列才能对齐
+    HFONT font = CreateFontW(-16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                             DEFAULT_PITCH | FF_MODERN, L"NSimSun");
+
+    std::vector<std::wstring> lines = rawLines;
+    int textW = 0, lineH = 0;
+    HDC hdc = GetDC(nullptr);
+    if (hdc)
+    {
+        HFONT old = (HFONT)SelectObject(hdc, font);
+
+        lines.clear();
+        for (auto& raw : rawLines)
+            lines.push_back(ExpandTabs(hdc, raw, tabColumn));
+
+        for (auto& line : lines)
+        {
+            SIZE sz{};
+            if (!line.empty() && GetTextExtentPoint32W(hdc, line.c_str(), (int)line.size(), &sz))
+            {
+                if (sz.cx > textW) textW = sz.cx;
+                if (sz.cy > lineH) lineH = sz.cy;
+            }
+        }
+        SelectObject(hdc, old);
+        ReleaseDC(nullptr, hdc);
+    }
+    if (lineH <= 0) lineH = 21;
+
+    std::wstring text = Join(lines, L"\r\n");
+
+    RECT wa{};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
+    int maxW = wa.right - wa.left, maxH = wa.bottom - wa.top;
+
+    int width = textW + 48;                 // 给纵向滚动条和边框留位
+    if (width < 820) width = 820;
+    if (width > maxW) width = maxW;
+
+    int height = (int)lines.size() * lineH + 56;
+    if (height < 460) height = 460;
+    if (height > maxH - 60) height = maxH - 60;
+
+    int x = wa.left + (maxW - width) / 2;
+    int y = wa.top + (maxH - height) / 2;
+
+    HWND hwnd = CreateWindowExW(0, L"RunMeHelpWnd", L"使用帮助", WS_OVERLAPPEDWINDOW,
+                                x, y, width, height, nullptr, nullptr, hinst, nullptr);
+    if (!hwnd)
+    {
+        if (font) DeleteObject(font);
+        ShowMessageBox(text, L"使用帮助");
+        return;
+    }
+
+    // 不换行：ES_AUTOHSCROLL + 横向滚动条，超长行自己滚
+    g_helpEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"Edit", L"",
+                                 WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL | ES_MULTILINE |
+                                     ES_READONLY | ES_AUTOVSCROLL | ES_AUTOHSCROLL,
+                                 0, 0, width, height, hwnd, (HMENU)1, hinst, nullptr);
+    if (!g_helpEdit)
+    {
+        DestroyWindow(hwnd);
+        if (font) DeleteObject(font);
+        return;
+    }
+
+    SendMessageW(g_helpEdit, WM_SETFONT, (WPARAM)font, TRUE);
+    SetWindowTextW(g_helpEdit, text.c_str());
+    SendMessageW(g_helpEdit, EM_SETSEL, 0, 0);
+    g_helpEditProc = (WNDPROC)SetWindowLongPtrW(g_helpEdit, GWLP_WNDPROC, (LONG_PTR)HelpEditProc);
+
+    ShowWindow(hwnd, SW_SHOW);
+    UpdateWindow(hwnd);
+    SetFocus(g_helpEdit);
+
+    MSG msg;
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0)
+    {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+
+    g_helpEdit = nullptr;
+    if (font) DeleteObject(font);
+}
+
+// 显示帮助信息（对照 C# ShowMessage，改为自绘窗口：可滚动、列对齐、不挤成乱换行）
+// 行内 \t = 分列位置，由窗口按真实字宽对齐
 static void ShowMessage()
 {
     std::vector<std::wstring> lines = {
-        L"改名即用：把本 exe 改名为入口名（如 Vs.exe），在 YanBinCfg.ini 的 [Config] 中配置同名键。",
-        L"",
-        L"  Vs=程序或路径                       双击直接启动",
-        L"  Dev=runme 名称1|目标1,名称2|目标2   双击弹出列表选择（runme 是列表标记）",
+        L"改名即用：把本 exe 改名为入口名（如 Vs.exe），在 YanBinCfg.ini 的 [Config] 中配置同名键，",
+        L"双击分身（如 Vs.exe）即可启动对应程序；一个小 exe 可复制成任意多个入口。",
         L"",
         L"值支持的写法（配置文件、列表条目目标、run.txt 行通用）：",
-        L"  · cmd / ps / powershell 命令         用 CMD 或 PowerShell 执行",
-        L"  · runadmin 目标                      管理员权限（与 cmd / ps 顺序任意：cmd runadmin xxx、ps runadmin xxx）",
-        L"  · show 目标                          显示窗口运行（默认不显示，例：show cmd xxx、cmd show xxx；提权时总显示）",
-        L"  · 裸命令                             dotnet、git、notepad 等按系统 PATH 直接执行",
-        L"  · 网址 / 目录 / 文件                 https://…、目录、文档交给系统默认方式打开",
-        L"  · 占位符                             {time.格式} {env.变量名} {guid.id} {random.最小-最大}",
-        L"  · {0}{1}…                            带参数运行分身（如拖拽文件到 exe 上）时自动填入",
-        L"  · 路径                               绝对路径直接运行；相对路径支持 pf\\、pf86\\、AppData、..\\ 前缀，其余按基准目录拼接",
+        L"  cmd / ps / powershell 命令\t用 CMD 或 PowerShell 执行",
+        L"  runadmin 目标\t管理员权限（与 cmd/ps 顺序任意：cmd runadmin xxx）",
+        L"  show 目标\t显示窗口运行（默认不显示：show cmd xxx、cmd show xxx）",
+        L"  裸命令\tdotnet、git、notepad 等按系统 PATH 直接执行",
+        L"  网址 / 目录 / 文件\t交给系统默认方式打开",
+        L"  占位符\t{time.格式} {env.变量名} {guid.id} {random.最小-最大}",
+        L"  {0}{1}…\t带参数运行分身（如拖拽文件到 exe 上）时自动填入",
+        L"  路径前缀\tpf\\ 与 pf86\\ = Program Files、AppData = 用户目录、",
+        L"\t..\\ = 上一级目录；其余相对路径按基准目录拼接",
         L"",
-        L"列表窗口：Enter 启动 / Shift+Enter 管理员启动 / 双击启动 / 滚轮切换 / 方向键循环 / Esc 关闭",
-        L"          倒计时到点自动启动当前选中项（标题栏显示剩余秒数；按键/滚轮/点击即取消）",
+        L"[Config] 列表（值以 runme 开头）：",
+        L"  例1\tVs=程序或路径  →  双击 Vs.exe 直接启动",
+        L"  例2\tDev=runme 名称1|目标1,名称2|目标2  →  双击 Dev.exe 弹列表",
+        L"",
+        L"列表窗口：Enter 启动 / Shift+Enter 管理员启动 / 双击启动 / 滚轮或方向键循环选择 / Esc 关闭",
+        L"\t倒计时到点自动启动当前选中项（标题栏显示剩余秒数；按键、滚轮、点击即取消）",
         L"",
         L"批量启动：新建 {分身名}run.txt（如 Vsrun.txt），每行一个目标，双击分身按行依次启动",
         L"",
-        L"配置：[Settings] RunParentDirectory=相对路径基准目录；ExcludeExeName=list 模式的排除名单；",
-        L"      ListAutoRunSeconds=列表窗口倒计时秒数（默认 5，0=不自动启动）",
+        L"配置项（[Settings]）：",
+        L"  RunParentDirectory\t相对路径的基准目录",
+        L"  ExcludeExeName\tlist 模式的排除名单（不含扩展名，| 分隔）",
+        L"  ListAutoRunSeconds\t列表窗口倒计时秒数（默认 5，0 = 不自动启动）",
         L"",
-        L"其他命令（命令行传递）：",
-        L"  runme 显示名|目标,…    临时列表（单条直接启动，多条弹列表）",
-        L"  list 扩展名 [目录]     列出目录中指定后缀的文件供选择（目录缺省为本目录）",
-        L"  runmeth                目录中其它 exe 全部替换为当前 exe（显示删/换结果）",
-        L"  runmefth               按 [Config] 的键批量生成分身（已存在不覆盖；显示删/生成结果）",
-        L"  help                   显示本帮助",
+        L"命令行命令（作为参数传给分身 exe）：",
+        L"  help\t显示本帮助（等宽窗口，可滚动，Esc 关闭）",
+        L"  list 扩展名 [目录]\t列出目录中指定后缀的文件供选择",
+        L"  runme 显示名|目标,…\t临时列表（单条直接启动，多条弹列表）",
+        L"  runmeth\t目录中其它 exe 全部替换为当前 exe（显示删/换结果）",
+        L"  runmefth\t按 [Config] 键批量生成分身（显示删/生成结果）",
         L"",
-        L"注：值以 runme 开头即为列表（显示名|目标,…），不带则整条按单条命令执行；详细说明见 YanBinCfg.ini 注释与 README.md"
+        L"注：值以 runme 开头即为列表，不带则整条按单条命令执行；详细说明见 YanBinCfg.ini 注释与 README.md"
     };
 
-    ShowMessageBox(Join(lines, L"\r\n"), L"使用帮助");
+    ShowHelpWindow(lines);
 }
 
 // 无参数（或带参数落到自身配置）：{name}run.txt → [Config][name] → runme 列表/单条
