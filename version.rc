@@ -1,0 +1,59 @@
+// ============================================================================
+// RunMeCpp 版本资源：exe「属性 → 详细信息」里显示的字段
+//   - 版本号在 version.h 里维护
+//   - 文件说明按编译目标自动区分 64 位 / 32 位（一眼能看出这个 exe 是哪个架构）
+// ============================================================================
+#pragma code_page(65001)
+
+#include <winver.h>
+#include "version.h"
+
+#define RUNME_STR2(x) #x
+#define RUNME_STR(x) RUNME_STR2(x)
+#define RUNME_VER_STR RUNME_STR(RUNME_VER_MAJOR) "." RUNME_STR(RUNME_VER_MINOR) "." RUNME_STR(RUNME_VER_PATCH) "." RUNME_STR(RUNME_VER_BUILD)
+
+// x64 配置由 vcxproj 传入 RUNME_ARCH_X64=1（rc.exe 不会自动定义 _WIN64）
+#ifndef RUNME_ARCH_X64
+#define RUNME_ARCH_X64 0
+#endif
+
+#if RUNME_ARCH_X64
+#define RUNME_ARCH_DESC "RunMe 启动器（C++/Win32 单文件实现，64 位 x64）"
+#define RUNME_ARCH_NAME "RunMeCpp (x64)"
+#else
+#define RUNME_ARCH_DESC "RunMe 启动器（C++/Win32 单文件实现，32 位 x86）"
+#define RUNME_ARCH_NAME "RunMeCpp (x86)"
+#endif
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION RUNME_VER_MAJOR,RUNME_VER_MINOR,RUNME_VER_PATCH,RUNME_VER_BUILD
+ PRODUCTVERSION RUNME_VER_MAJOR,RUNME_VER_MINOR,RUNME_VER_PATCH,RUNME_VER_BUILD
+ FILEFLAGSMASK 0x3fL
+#ifdef _DEBUG
+ FILEFLAGS VS_FF_DEBUG
+#else
+ FILEFLAGS 0x0L
+#endif
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404B0"
+        BEGIN
+            VALUE "CompanyName", "YanDaGuanRen"
+            VALUE "FileDescription", RUNME_ARCH_DESC
+            VALUE "FileVersion", RUNME_VER_STR
+            VALUE "InternalName", "RunMeCpp"
+            VALUE "LegalCopyright", "Copyright (c) 2026 YanDaGuanRen"
+            VALUE "OriginalFilename", "RunMeCpp.exe"
+            VALUE "ProductName", RUNME_ARCH_NAME
+            VALUE "ProductVersion", RUNME_VER_STR
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x804, 1200
+    END
+END

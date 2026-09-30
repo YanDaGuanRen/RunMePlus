@@ -337,6 +337,19 @@ if (-not $pb.HasExited) { Stop-Process -Id $pb.Id -Force -ErrorAction SilentlyCo
 $okB = $aliveB -and $nofilesB -and ($titleB -match '\u79D2\u540E\u542F\u52A8') -and ($titleC -notmatch '\u79D2\u540E\u542F\u52A8')
 Add-Result 'user action cancels the countdown' $okB ("alive=$aliveB nofiles=$nofilesB title='$titleC'")
 
+# 12) version resource: fields present and architecture matches the PE header
+$vi = (Get-Item $exe).VersionInfo
+$okV = ($vi.FileVersion -match '^\d+\.\d+\.\d+\.\d+$') -and ($vi.ProductVersion -match '^\d+\.\d+\.\d+\.\d+$') -and
+        ($vi.ProductName -like 'RunMeCpp*') -and ($vi.FileDescription) -and ($vi.LegalCopyright)
+Add-Result 'exe carries version info' $okV ("ver=$($vi.FileVersion) product='$($vi.ProductName)'")
+
+$pe = [System.IO.File]::ReadAllBytes($exe)
+$peOff = [BitConverter]::ToInt32($pe, 0x3C)
+$machine = [BitConverter]::ToUInt16($pe, $peOff + 4)      # 0x8664 = x64, 0x14C = x86
+$archOk = ((($machine -eq 0x8664) -and ($vi.FileDescription -like '*x64*')) -or
+           (($machine -eq 0x014C) -and ($vi.FileDescription -like '*x86*')))
+Add-Result 'version-info architecture matches PE header' $archOk ("machine=0x{0:X} desc='{1}'" -f $machine, $vi.FileDescription)
+
 # ---------------- summary ----------------
 Write-Host ''
 $results | Format-Table -AutoSize

@@ -25,6 +25,8 @@ msbuild RunMeCpp.sln /p:Configuration=Release /p:Platform=Win32   # 32 位
 
 两个平台行为一致（两套测试在 x64 与 Win32 上均全过）；x86 版给 32 位 Windows 生产机用。
 
+exe 带版本资源：右键「属性 → 详细信息」可直接看到 **64 位 x64 / 32 位 x86**、版本号与版权（版本号在 `version.h` 维护，发版时与 git tag 对齐）。
+
 ## 功能（与 C# 版一致）
 
 - **改名即用**：exe 改名成入口名（如 `Vs.exe`），在 `YanBinCfg.ini` 的 `[Config]` 配同名键
@@ -68,5 +70,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File docs\run-tests-extra.ps1
 ## 文件
 
 - `main.cpp`：全部实现（单文件）
-- `RunMeCpp.sln` / `RunMeCpp.vcxproj`：VS 工程（Debug/Release x64）
+- `version.h` / `version.rc`：版本号与 exe 版本资源（属性面板里的信息、架构标识）
+- `RunMeCpp.sln` / `RunMeCpp.vcxproj`：VS 工程（Debug/Release × x64/Win32）
 - `docs\run-tests.ps1`：黑盒测试脚本
