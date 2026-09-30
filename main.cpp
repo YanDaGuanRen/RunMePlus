@@ -167,6 +167,68 @@ static void ShowMessageBox(const std::wstring& text, const std::wstring& caption
     MessageBoxW(nullptr, text.c_str(), caption.c_str(), MB_OK);
 }
 
+// 系统错误码 → 可读文本（把失败原因告诉用户，而不是默默吞掉）
+static std::wstring FormatWinError(DWORD code)
+{
+    LPWSTR buf = nullptr;
+    DWORD n = FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
+                                 FORMAT_MESSAGE_IGNORE_INSERTS,
+                             nullptr, code, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+                             (LPWSTR)&buf, 0, nullptr);
+
+    std::wstring text;
+    if (n && buf) text.assign(buf, n);
+    if (buf) LocalFree(buf);
+
+    while (!text.empty() && (text.back() == L'\r' || text.back() == L'\n' || text.back() == L' ' || text.back() == L'。'))
+        text.pop_back();
+
+    if (text.empty()) return L"错误码 " + std::to_wstring(code);
+    return text + L"（" + std::to_wstring(code) + L"）";
+}
+
+// 输出执行结果：控制台 → 直接写；stdout 被重定向（管道/文件）→ 写 UTF-8 字节；
+// 都没有（双击运行）→ 弹消息框。保证脚本环境下不会阻塞。
+static void ReportResult(const std::wstring& text, const std::wstring& caption)
+{
+    std::wstring block = L"\r\n" + caption + L"\r\n" + text + L"\r\n";
+
+    HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD mode = 0;
+    bool hasConsole = out && out != INVALID_HANDLE_VALUE && GetConsoleMode(out, &mode) != 0;
+    bool attached = false;
+
+    if (!hasConsole && AttachConsole(ATTACH_PARENT_PROCESS))
+    {
+        attached = true;
+        out = GetStdHandle(STD_OUTPUT_HANDLE);
+        hasConsole = out && out != INVALID_HANDLE_VALUE && GetConsoleMode(out, &mode) != 0;
+    }
+
+    if (hasConsole)
+    {
+        DWORD written = 0;
+        WriteConsoleW(out, block.c_str(), (DWORD)block.size(), &written, nullptr);   // 控制台按 UTF-16 写，中文不乱码
+        if (attached) FreeConsole();
+        return;
+    }
+
+    if (out && out != INVALID_HANDLE_VALUE)   // 重定向：转 UTF-8 写字节
+    {
+        int bytes = WideCharToMultiByte(CP_UTF8, 0, block.c_str(), (int)block.size(), nullptr, 0, nullptr, nullptr);
+        if (bytes > 0)
+        {
+            std::string utf8((size_t)bytes, '\0');
+            WideCharToMultiByte(CP_UTF8, 0, block.c_str(), (int)block.size(), &utf8[0], bytes, nullptr, nullptr);
+            DWORD written = 0;
+            WriteFile(out, utf8.data(), (DWORD)utf8.size(), &written, nullptr);
+        }
+        return;
+    }
+
+    ShowMessageBox(text, caption);
+}
+
 // 裸命令判定：无路径分隔符/盘符且无扩展名（对照 C# 版的判定）
 static bool IsBareCommand(const std::wstring& s)
 {
@@ -1153,8 +1215,8 @@ static void CfgInit()
         L"#   help                    显示帮助",
         L"#   list 扩展名 [目录]      列出目录中指定后缀的文件供选择（目录缺省为本目录）",
         L"#   runme 显示名|目标,…    临时列表（单条直接启动，多条弹列表）",
-        L"#   runmeth                 目录中其它 exe 全部替换为当前 exe",
-        L"#   runmefth                按 [Config] 的键批量生成分身（已存在不覆盖）",
+        L"#   runmeth                 目录中其它 exe 全部替换为当前 exe（显示删/换结果）",
+        L"#   runmefth                按 [Config] 的键批量生成分身（已存在不覆盖；显示删/生成结果）",
         L""
     };
 
@@ -1648,24 +1710,60 @@ static void ShowListBox()
     if (font) DeleteObject(font);
 }
 
-// runmeth：目录中其它 exe 全部替换为当前 exe（对照 C# ReplaceAll）
+// 把失败项附加到输出（无失败时什么都不加）
+static void AppendProblems(std::vector<std::wstring>& lines, const std::vector<std::wstring>& problems)
+{
+    if (problems.empty()) return;
+
+    lines.push_back(L"");
+    lines.push_back(L"失败 " + std::to_wstring(problems.size()) + L" 项：");
+    for (auto& p : problems)
+        lines.push_back(L"  · " + p);
+}
+
+// runmeth：目录中其它 exe 全部替换为当前 exe（对照 C# ReplaceAll）；完成后汇报结果
 static void ReplaceAll()
 {
+    int deleted = 0, copied = 0;
+    std::vector<std::wstring> problems;
+
     for (auto& se : ListFilesInDir(g_exeDir, L"*.exe"))
     {
         if (EqualsNoCase(se, g_exePath)) continue;   // 跳过自身
-        DeleteFileW(se.c_str());                     // File.Delete + File.Copy（失败跳过该文件）
-        CopyFileW(g_exePath.c_str(), se.c_str(), FALSE);
+
+        if (!DeleteFileW(se.c_str()))
+        {
+            problems.push_back(L"删除 " + GetFileName(se) + L"：" + FormatWinError(GetLastError()));
+            continue;                                // File.Delete + File.Copy（失败跳过该文件）
+        }
+        deleted++;
+
+        if (CopyFileW(g_exePath.c_str(), se.c_str(), FALSE)) copied++;
+        else problems.push_back(L"写入 " + GetFileName(se) + L"：" + FormatWinError(GetLastError()));
     }
+
+    std::vector<std::wstring> lines;
+    lines.push_back(L"目录：" + g_exeDir);
+    lines.push_back(L"删除 " + std::to_wstring(deleted) + L" 个，替换 " + std::to_wstring(copied) + L" 个");
+    if (deleted == 0 && problems.empty())
+        lines.push_back(L"（目录里没有其它 exe，无需处理）");
+    AppendProblems(lines, problems);
+
+    ReportResult(Join(lines, L"\r\n"), L"runmeth");
 }
 
-// runmefth：先清掉非自身的 exe，再按 [Config] 的键批量生成分身（对照 C# ReplaceAllX）
+// runmefth：先清掉非自身的 exe，再按 [Config] 的键批量生成分身（对照 C# ReplaceAllX）；完成后汇报结果
 static void ReplaceAllX()
 {
+    int deleted = 0, copied = 0, keyCount = 0;
+    std::vector<std::wstring> problems;
+
     for (auto& se : ListFilesInDir(g_exeDir, L"*.exe"))
     {
         if (EqualsNoCase(RemoveExtension(GetFileName(se)), g_exeName)) continue;
-        DeleteFileW(se.c_str());
+
+        if (DeleteFileW(se.c_str())) deleted++;
+        else problems.push_back(L"删除 " + GetFileName(se) + L"：" + FormatWinError(GetLastError()));
     }
 
     for (auto& section : g_config)
@@ -1675,12 +1773,29 @@ static void ReplaceAllX()
         for (auto& kv : section.second)
         {
             if (EqualsNoCase(kv.first, g_exeName)) continue;
+            keyCount++;
 
             std::wstring target = CombinePath(g_exeDir, kv.first + L".exe");
-            if (!FileExists(target))
-                CopyFileW(g_exePath.c_str(), target.c_str(), FALSE);
+            if (FileExists(target))
+            {
+                // 正常情况下上一步已删掉；还能存在说明旧文件删不掉（被占用/无权限）
+                problems.push_back(L"未更新 " + kv.first + L".exe（旧文件删不掉）");
+                continue;
+            }
+
+            if (CopyFileW(g_exePath.c_str(), target.c_str(), FALSE)) copied++;
+            else problems.push_back(L"生成 " + kv.first + L".exe：" + FormatWinError(GetLastError()));
         }
     }
+
+    std::vector<std::wstring> lines;
+    lines.push_back(L"目录：" + g_exeDir);
+    lines.push_back(L"删除 " + std::to_wstring(deleted) + L" 个，生成 " + std::to_wstring(copied) + L" 个");
+    if (keyCount == 0)
+        lines.push_back(L"[Config] 里没有可用的键（配置文件：" + g_cfgPath + L"）");
+    AppendProblems(lines, problems);
+
+    ReportResult(Join(lines, L"\r\n"), L"runmefth");
 }
 
 // 显示帮助信息（对照 C# ShowMessage）
@@ -1713,8 +1828,8 @@ static void ShowMessage()
         L"其他命令（命令行传递）：",
         L"  runme 显示名|目标,…    临时列表（单条直接启动，多条弹列表）",
         L"  list 扩展名 [目录]     列出目录中指定后缀的文件供选择（目录缺省为本目录）",
-        L"  runmeth                目录中其它 exe 全部替换为当前 exe",
-        L"  runmefth               按 [Config] 的键批量生成分身（已存在不覆盖）",
+        L"  runmeth                目录中其它 exe 全部替换为当前 exe（显示删/换结果）",
+        L"  runmefth               按 [Config] 的键批量生成分身（已存在不覆盖；显示删/生成结果）",
         L"  help                   显示本帮助",
         L"",
         L"注：值以 runme 开头即为列表（显示名|目标,…），不带则整条按单条命令执行；详细说明见 YanBinCfg.ini 注释与 README.md"

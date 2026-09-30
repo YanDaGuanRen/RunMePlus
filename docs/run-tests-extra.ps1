@@ -350,6 +350,42 @@ $archOk = ((($machine -eq 0x8664) -and ($vi.FileDescription -like '*x64*')) -or
            (($machine -eq 0x014C) -and ($vi.FileDescription -like '*x86*')))
 Add-Result 'version-info architecture matches PE header' $archOk ("machine=0x{0:X} desc='{1}'" -f $machine, $vi.FileDescription)
 
+# 13/14) runmeth family must report what it did (read back from redirected stdout -
+#        this also proves the command never blocks waiting for a dialog)
+$repDir = Join-Path $env:TEMP 'RunMeCppRpt'
+Remove-Item $repDir -Recurse -Force -ErrorAction SilentlyContinue
+New-Item $repDir -ItemType Directory | Out-Null
+Copy-Item $exe (Join-Path $repDir 'RunMe.exe')
+@"
+[Settings]
+RunParentDirectory=$repDir
+[Config]
+R1=cmd echo r1
+R2=cmd echo r2
+"@ | Set-Content -Path (Join-Path $repDir 'YanBinCfg.ini') -Encoding UTF8
+
+function Invoke-Report([string]$dir, [string]$file) {
+    $out = Join-Path $dir $file
+    $proc = Start-Process -FilePath (Join-Path $dir 'RunMe.exe') -ArgumentList 'runmefth' `
+                          -WorkingDirectory $dir -PassThru -Wait -RedirectStandardOutput $out
+    $text = ''
+    if (Test-Path $out) { $text = [System.IO.File]::ReadAllText($out, [System.Text.Encoding]::UTF8) }
+    return @{ Exit = $proc.ExitCode; Text = $text }
+}
+
+$r1 = Join-Path $repDir 'R1.exe'
+$r2 = Join-Path $repDir 'R2.exe'
+$rep1 = Invoke-Report $repDir 'report1.txt'
+$ok13 = ($rep1.Exit -eq 0) -and ($rep1.Text -match '\u5220\u9664 0 \u4E2A') -and
+        ($rep1.Text -match '\u751F\u6210 2 \u4E2A') -and (Test-Path $r1) -and (Test-Path $r2)
+Add-Result 'runmefth reports deleted 0 / created 2' $ok13 ("exit=$($rep1.Exit) report='$($rep1.Text -replace '\r?\n', ' | ')'")
+
+Set-ItemProperty $r1 -Name IsReadOnly -Value $true
+$rep2 = Invoke-Report $repDir 'report2.txt'
+Set-ItemProperty $r1 -Name IsReadOnly -Value $false
+$ok14 = ($rep2.Exit -eq 0) -and ($rep2.Text -match '\u5931\u8D25 \d+ \u9879') -and (Test-Path $r1)
+Add-Result 'runmefth reports failures instead of skipping silently' $ok14 ("exit=$($rep2.Exit) report='$($rep2.Text -replace '\r?\n', ' | ')'")
+
 # ---------------- summary ----------------
 Write-Host ''
 $results | Format-Table -AutoSize
