@@ -17,11 +17,19 @@ Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
+[StructLayout(LayoutKind.Sequential)]
+public struct RECT { public int Left, Top, Right, Bottom; }
 public static class W32 {
     public delegate bool EnumProc(IntPtr hWnd, IntPtr lParam);
     [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr parent, EnumProc cb, IntPtr lp);
     [DllImport("user32.dll", CharSet = CharSet.Auto)] public static extern int GetClassName(IntPtr h, StringBuilder sb, int n);
     [DllImport("user32.dll", EntryPoint = "SendMessageW")] public static extern IntPtr SendMessageI(IntPtr h, int msg, IntPtr wp, IntPtr lp);
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+    public static int WindowWidth(IntPtr h) {
+        RECT r;
+        if (!GetWindowRect(h, out r)) return 0;
+        return r.Right - r.Left;
+    }
     public static IntPtr FindListBox(IntPtr parent) {
         IntPtr found = IntPtr.Zero;
         EnumProc cb = (h, l) => {
@@ -142,6 +150,8 @@ $iniLines = New-Object System.Collections.ArrayList
 [void]$iniLines.Add('[Settings]')
 [void]$iniLines.Add("RunParentDirectory=$sandbox")
 [void]$iniLines.Add('ExcludeExeName=RunMe|MeRun')
+$iniLines.Add('# countdown off: these cases must keep the window open while driving the list')
+[void]$iniLines.Add('ListAutoRunSeconds=0')
 [void]$iniLines.Add('')
 [void]$iniLines.Add('[Config]')
 [void]$iniLines.Add("Dx=runme D1|cmd echo d1>$d1,D2|cmd echo d2>$d2")
@@ -213,6 +223,119 @@ if ($pfLine -ne '') {
 } else {
     Add-Result 'pf prefix resolves under Program Files' $false 'no suitable console app found under Program Files'
 }
+
+# ---------------- list countdown / arrow-key cycle ----------------
+
+# send WM_KEYDOWN to the listbox (VK_DOWN = 0x28 / VK_UP = 0x26 / VK_RETURN = 0x0D)
+function Send-ListKey([IntPtr]$lb, [int]$vk, [int]$times = 1) {
+    for ($i = 0; $i -lt $times; $i++) { [void][W32]::SendMessageI($lb, 0x0100, [IntPtr]$vk, [IntPtr]0) }
+}
+
+function New-AutoSandbox([string]$dir, [string]$exeName, [string]$configLines) {
+    Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
+    New-Item $dir -ItemType Directory | Out-Null
+    Copy-Item $exe (Join-Path $dir $exeName)
+    $configLines | Set-Content -Path (Join-Path $dir 'YanBinCfg.ini') -Encoding UTF8
+}
+
+# 7) countdown: remaining seconds shown in the title bar + first item auto-runs when idle
+#    title suffix: "(N <sec-word><after-word><start-word><run-word> <name>)" - matched via \u escapes
+$autoDir = Join-Path $env:TEMP 'RunMeCppAuto'
+$au1 = Join-Path $autoDir 'au1.txt'
+$au2 = Join-Path $autoDir 'au2.txt'
+$au3 = Join-Path $autoDir 'au3.txt'
+New-AutoSandbox $autoDir 'Auto.exe' @"
+[Settings]
+RunParentDirectory=$autoDir
+[Config]
+Auto=runme A1|cmd echo au1>$au1,A2|cmd echo au2>$au2,A3|cmd echo au3>$au3
+"@
+
+$pa = Start-Process -FilePath (Join-Path $autoDir 'Auto.exe') -WorkingDirectory $autoDir -PassThru
+$title7 = ''
+$width7 = 0
+$sw7 = [System.Diagnostics.Stopwatch]::StartNew()
+while ($sw7.ElapsedMilliseconds -lt 3000 -and $title7 -eq '' -and -not $pa.HasExited) {
+    $pa.Refresh()
+    if ($pa.MainWindowTitle) {
+        $title7 = $pa.MainWindowTitle
+        $width7 = [W32]::WindowWidth($pa.MainWindowHandle)
+    }
+    [System.Threading.Thread]::Sleep(100)
+}
+Add-Result 'countdown shown in title bar' ($title7 -match '\u79D2\u540E\u542F\u52A8') ("title='$title7'")
+Add-Result 'window widened so the countdown fits' ($width7 -gt 402) ("width=$width7")
+
+$exited7 = $pa.WaitForExit(12000)
+$c7 = Get-FileText $au1
+if (-not $pa.HasExited) { Stop-Process -Id $pa.Id -Force -ErrorAction SilentlyContinue }
+$ok7 = $exited7 -and ($c7 -eq 'au1') -and (-not (Test-Path $au2)) -and (-not (Test-Path $au3))
+Add-Result 'countdown auto-runs the first item after timeout' $ok7 ("exited=$exited7 value='$c7'")
+
+# 8) ListAutoRunSeconds=0 -> window stays open until the user acts
+$offDir = Join-Path $env:TEMP 'RunMeCppAutoOff'
+$of1 = Join-Path $offDir 'of1.txt'
+$of2 = Join-Path $offDir 'of2.txt'
+$of3 = Join-Path $offDir 'of3.txt'
+New-AutoSandbox $offDir 'Off.exe' @"
+[Settings]
+RunParentDirectory=$offDir
+ListAutoRunSeconds=0
+[Config]
+Off=runme B1|cmd echo of1>$of1,B2|cmd echo of2>$of2,B3|cmd echo of3>$of3
+"@
+
+$po = Start-Process -FilePath (Join-Path $offDir 'Off.exe') -WorkingDirectory $offDir -PassThru
+$lbo = Get-ListBoxHandle $po
+[System.Threading.Thread]::Sleep(6500)
+$po.Refresh()
+$na = -not $po.HasExited; $nf = -not (Test-Path $of1)
+$title8 = $po.MainWindowTitle
+if (-not $po.HasExited) { Stop-Process -Id $po.Id -Force -ErrorAction SilentlyContinue }
+Add-Result 'ListAutoRunSeconds=0 disables auto start' ($na -and $nf -and ($title8 -notmatch '\u79D2\u540E\u542F\u52A8') -and ($lbo -ne [IntPtr]::Zero)) ("alive=$na nofile=$nf title='$title8'")
+
+# 9) arrow down past the last item wraps to the first
+$p9 = Start-Process -FilePath (Join-Path $offDir 'Off.exe') -WorkingDirectory $offDir -PassThru
+$lb9 = Get-ListBoxHandle $p9
+if ($lb9 -ne [IntPtr]::Zero) {
+    Send-ListKey $lb9 0x28 3          # 3 items: down x3 must wrap back to item 1
+    Send-ListKey $lb9 0x0D
+}
+$c9 = Get-FileText $of1
+if (-not $p9.HasExited) { Stop-Process -Id $p9.Id -Force -ErrorAction SilentlyContinue }
+Add-Result 'arrow down wraps last -> first item' ($c9 -eq 'of1') ("value='$c9'")
+
+# 10) arrow up from the first item wraps to the last
+$p10 = Start-Process -FilePath (Join-Path $offDir 'Off.exe') -WorkingDirectory $offDir -PassThru
+$lb10 = Get-ListBoxHandle $p10
+if ($lb10 -ne [IntPtr]::Zero) {
+    Send-ListKey $lb10 0x26          # up x1: item 1 -> item 3 (last)
+    Send-ListKey $lb10 0x0D
+}
+$c10 = Get-FileText $of3
+if (-not $p10.HasExited) { Stop-Process -Id $p10.Id -Force -ErrorAction SilentlyContinue }
+Add-Result 'arrow up wraps first -> last item' ($c10 -eq 'of3') ("value='$c10'")
+
+# 11) any user action cancels the countdown (nothing auto-runs afterwards)
+Remove-Item $au1, $au2, $au3 -Force -ErrorAction SilentlyContinue
+$pb = Start-Process -FilePath (Join-Path $autoDir 'Auto.exe') -WorkingDirectory $autoDir -PassThru
+$lbb = Get-ListBoxHandle $pb
+$titleB = ''
+if ($lbb -ne [IntPtr]::Zero) {
+    $pb.Refresh()
+    $titleB = $pb.MainWindowTitle
+    Send-ListKey $lbb 0x28 1                 # VK_DOWN -> user takes over, countdown must go away
+    [System.Threading.Thread]::Sleep(600)
+    $pb.Refresh()
+}
+$titleC = $pb.MainWindowTitle
+[System.Threading.Thread]::Sleep(6000)       # longer than the 5s default
+$pb.Refresh()
+$aliveB = -not $pb.HasExited
+$nofilesB = (-not (Test-Path $au1)) -and (-not (Test-Path $au2)) -and (-not (Test-Path $au3))
+if (-not $pb.HasExited) { Stop-Process -Id $pb.Id -Force -ErrorAction SilentlyContinue }
+$okB = $aliveB -and $nofilesB -and ($titleB -match '\u79D2\u540E\u542F\u52A8') -and ($titleC -notmatch '\u79D2\u540E\u542F\u52A8')
+Add-Result 'user action cancels the countdown' $okB ("alive=$aliveB nofiles=$nofilesB title='$titleC'")
 
 # ---------------- summary ----------------
 Write-Host ''

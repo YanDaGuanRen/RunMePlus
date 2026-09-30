@@ -28,6 +28,7 @@
 #include <algorithm>
 #include <cwchar>
 #include <cwctype>
+#include <cstdlib>
 
 // ============================================================================
 // 基础工具
@@ -53,6 +54,18 @@ static std::wstring Trim(const std::wstring& s)
     while (end > begin && (s[end - 1] == L' ' || s[end - 1] == L'\t' || s[end - 1] == L'\r'))
         --end;
     return s.substr(begin, end - begin);
+}
+
+// 解析十进制整数；非数字时返回 fallback（配置项宽容解析）
+static int ParseIntOrDefault(const std::wstring& s, int fallback)
+{
+    std::wstring t = Trim(s);
+    if (t.empty()) return fallback;
+
+    wchar_t* end = nullptr;
+    long v = wcstol(t.c_str(), &end, 10);
+    if (end == t.c_str()) return fallback;
+    return (int)v;
 }
 
 static std::wstring ToLower(const std::wstring& s)
@@ -1087,6 +1100,9 @@ static void CfgInit()
         L"RunParentDirectory=" + g_exeDir,
         L"# list 模式排除名单（| 分隔、不含扩展名；仅 list 生效，[Config] 列表不受影响）",
         L"ExcludeExeName=RunMe|MeRun",
+        L"# 列表窗口倒计时秒数：到点自动启动当前选中项，标题栏显示剩余秒数",
+        L"#   （用户一旦按键/滚轮/点击即取消倒计时；0 = 完全关闭自动启动）",
+        L"ListAutoRunSeconds=5",
         L"# 自定义变量：供 {env.变量名} 引用",
         L"apiKey=你的密钥",
         L"",
@@ -1117,7 +1133,8 @@ static void CfgInit()
         L"HelloPS=ps echo hello > \"$HOME\\hello.txt\"",
         L"",
         L"# ⑧ 多条目列表：值以 runme 开头 + 显示名|目标,…（单条直接启动，多条弹列表）",
-        L"#    列表窗口：Enter 启动 / Shift+Enter 管理员启动 / Esc 关闭",
+        L"#    列表窗口：Enter 启动 / Shift+Enter 管理员启动 / 双击 / 滚轮 / 方向键循环 / Esc 关闭",
+        L"#    倒计时到点自动启动当前选中项（标题栏显示剩余秒数；一旦操作即取消，见 [Settings] ListAutoRunSeconds）",
         L"Dev=runme 7-Zip|pf\\7-Zip\\7zFM.exe,Notepad++|pf\\Notepad++\\notepad++.exe",
         L"Tools=runme 记事本|notepad,计算器|cmd start calc",
         L"",
@@ -1218,6 +1235,12 @@ static std::vector<RunEntry> g_runDict;   // 顺序即列表显示顺序（对�
 static HWND g_listBoxWnd = nullptr;
 static WNDPROC g_listBoxProc = nullptr;
 
+// 列表窗口倒计时（[Settings] ListAutoRunSeconds，默认 5 秒；0 = 不自动启动）
+static const wchar_t* kListTitle = L"很牛B的一个程序启动器";
+static const UINT_PTR kListTimerId = 0x9527;
+static int g_listAutoRunSeconds = 5;
+static int g_listCountdownLeft = 0;
+
 static void RunDictSet(const std::wstring& name, const std::wstring& target)
 {
     for (auto& e : g_runDict)
@@ -1309,22 +1332,88 @@ static void GetFilesList(const std::wstring& path, const std::wstring& suffix)
         RunDictSet(n, CombinePath(path, n + suffix));
 }
 
-// 启动当前选中项（对照 Enter / 双击）
-static void ListLaunchSelected(bool runas)
+// 启动指定条目（对照 Enter / 双击 / 倒计时到期）
+static void ListLaunchIndex(int index, bool runas)
 {
     if (!g_listBoxWnd) return;
+    if (index < 0 || index >= (int)g_runDict.size()) return;
 
-    int sel = (int)SendMessageW(g_listBoxWnd, LB_GETCURSEL, 0, 0);
-    if (sel < 0 || sel >= (int)g_runDict.size()) return;
-
-    std::wstring target = g_runDict[sel].target;
+    std::wstring target = g_runDict[index].target;
     HWND main = GetParent(g_listBoxWnd);
 
     WinExec(target, runas);     // 对照 C#：先 WinExec 再 Close()
     DestroyWindow(main);
 }
 
-// 列表框子类化：Enter / Shift+Enter / Esc / 滚轮循环切换（对照 C# 键盘与滚轮事件）
+// 启动当前选中项（对照 Enter / 双击）
+static void ListLaunchSelected(bool runas)
+{
+    if (!g_listBoxWnd) return;
+
+    ListLaunchIndex((int)SendMessageW(g_listBoxWnd, LB_GETCURSEL, 0, 0), runas);
+}
+
+// 标题栏文字：原始标题 + 倒计时（倒计时已关闭/已取消时不加后缀）
+static std::wstring MakeListTitle(int sel)
+{
+    std::wstring title = kListTitle;
+    if (g_listAutoRunSeconds > 0 && g_listCountdownLeft > 0 && !g_runDict.empty())
+    {
+        if (sel < 0 || sel >= (int)g_runDict.size()) sel = 0;
+        title += L"（" + std::to_wstring(g_listCountdownLeft) + L" 秒后启动 " + g_runDict[sel].name + L"）";
+    }
+    return title;
+}
+
+// 量出标题栏文字宽度（用于把窗口撑到放得下标题）
+static int MeasureTitleWidth(const std::wstring& title)
+{
+    NONCLIENTMETRICSW ncm{};
+    ncm.cbSize = sizeof(ncm);
+    if (!SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0))
+        return 0;
+
+    HDC hdc = GetDC(nullptr);
+    if (!hdc) return 0;
+
+    HFONT font = CreateFontIndirectW(&ncm.lfCaptionFont);
+    HFONT old = (HFONT)SelectObject(hdc, font);
+
+    SIZE textSize{};
+    GetTextExtentPoint32W(hdc, title.c_str(), (int)title.size(), &textSize);
+
+    SelectObject(hdc, old);
+    if (font) DeleteObject(font);
+    ReleaseDC(nullptr, hdc);
+
+    return textSize.cx;
+}
+
+// 标题栏：刷新为“原始标题 + 倒计时”（倒计时取消后自动回到原始标题）
+static void ListUpdateTitle()
+{
+    if (!g_listBoxWnd || !IsWindow(g_listBoxWnd)) return;
+
+    HWND main = GetParent(g_listBoxWnd);
+    if (!main) return;
+
+    SetWindowTextW(main, MakeListTitle((int)SendMessageW(g_listBoxWnd, LB_GETCURSEL, 0, 0)).c_str());
+}
+
+// 用户开始操作（按键 / 滚轮 / 点击）→ 取消倒计时：不再自动启动，标题栏也不再显示
+static void ListCancelCountdown()
+{
+    if (g_listCountdownLeft <= 0) return;
+
+    g_listCountdownLeft = 0;
+
+    HWND main = (g_listBoxWnd && IsWindow(g_listBoxWnd)) ? GetParent(g_listBoxWnd) : nullptr;
+    if (main) KillTimer(main, kListTimerId);
+
+    ListUpdateTitle();
+}
+
+// 列表框子类化：Enter / Shift+Enter / 方向键循环 / 滚轮循环切换 / Esc（对照 C# 键盘与滚轮事件）
 static LRESULT CALLBACK ListBoxProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     if (msg == WM_GETDLGCODE)
@@ -1343,6 +1432,21 @@ static LRESULT CALLBACK ListBoxProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             DestroyWindow(GetParent(hwnd));
             return 0;
         }
+        if (wp == VK_UP || wp == VK_DOWN)
+        {
+            // 方向键循环：末项按下回到首项，首项按上跳到末项
+            int count = (int)SendMessageW(hwnd, LB_GETCOUNT, 0, 0);
+            if (count <= 0) return 0;
+
+            int cur = (int)SendMessageW(hwnd, LB_GETCURSEL, 0, 0);
+            if (cur < 0 || cur >= count) cur = 0;
+
+            int next = (wp == VK_DOWN) ? ((cur + 1) % count) : ((cur + count - 1) % count);
+            SendMessageW(hwnd, LB_SETCURSEL, next, 0);
+            SendMessageW(hwnd, LB_SETCARETINDEX, next, FALSE);
+            ListCancelCountdown();       // 一旦动手选择，倒计时就取消
+            return 0;
+        }
     }
     else if (msg == WM_MOUSEWHEEL)
     {
@@ -1353,6 +1457,7 @@ static LRESULT CALLBACK ListBoxProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (cur < 0)
         {
             SendMessageW(hwnd, LB_SETCURSEL, 0, 0);
+            ListCancelCountdown();
             return 0;
         }
 
@@ -1365,10 +1470,20 @@ static LRESULT CALLBACK ListBoxProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
         SendMessageW(hwnd, LB_SETCURSEL, next, 0);
         SendMessageW(hwnd, LB_SETCARETINDEX, next, FALSE);
+        ListCancelCountdown();           // 滚轮也是“动手选择”
         return 0;
     }
 
-    return CallWindowProcW(g_listBoxProc, hwnd, msg, wp, lp);
+    // 其余按键 / 点击先取消倒计时，再走默认处理（默认处理可能改选中项，之后再刷新标题）
+    if (msg == WM_KEYDOWN || msg == WM_LBUTTONDOWN || msg == WM_LBUTTONDBLCLK)
+        ListCancelCountdown();
+
+    LRESULT result = CallWindowProcW(g_listBoxProc, hwnd, msg, wp, lp);
+
+    if (IsWindow(hwnd) && (msg == WM_KEYDOWN || msg == WM_LBUTTONDOWN))
+        ListUpdateTitle();
+
+    return result;
 }
 
 // 列表窗口过程（自绘条目 + 双击启动）
@@ -1376,6 +1491,25 @@ static LRESULT CALLBACK ListWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg)
     {
+    case WM_TIMER:
+        if (wp == kListTimerId)
+        {
+            if (--g_listCountdownLeft <= 0)
+            {
+                KillTimer(hwnd, kListTimerId);
+
+                // 倒计时到期：启动当前选中项（未操作时即第一项，即“默认启动第一个”）
+                int sel = g_listBoxWnd ? (int)SendMessageW(g_listBoxWnd, LB_GETCURSEL, 0, 0) : 0;
+                ListLaunchIndex(sel < 0 ? 0 : sel, false);
+            }
+            else
+            {
+                ListUpdateTitle();
+            }
+            return 0;
+        }
+        break;
+
     case WM_SIZE:
         if (g_listBoxWnd)
             MoveWindow(g_listBoxWnd, 0, 0, LOWORD(lp), HIWORD(lp), TRUE);
@@ -1453,19 +1587,29 @@ static void ShowListBox()
     int height = itemHeight + itemHeight * (int)g_runDict.size();
     if (height > 800) height = 800; // 对照 MaxFormHeight
 
+    // 倒计时会让标题变长：先按标题文字宽度把窗口撑宽（不小于原宽度，且不超过工作区）
+    g_listCountdownLeft = g_listAutoRunSeconds;
+    int listWidth = formWidth;
+    if (g_listAutoRunSeconds > 0)
+    {
+        int needed = MeasureTitleWidth(MakeListTitle(0)) + 190;   // 190 ≈ 图标 + 最小化/关闭按钮 + 边框
+        if (needed > listWidth) listWidth = needed;
+    }
+
     RECT wa{};
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
-    int x = wa.left + ((wa.right - wa.left) - formWidth) / 2;
+    if (listWidth > wa.right - wa.left) listWidth = wa.right - wa.left;
+    int x = wa.left + ((wa.right - wa.left) - listWidth) / 2;
     int y = wa.top + ((wa.bottom - wa.top) - height) / 2;
 
-    HWND hwnd = CreateWindowExW(0, L"RunMeListWnd", L"很牛B的一个程序启动器", WS_OVERLAPPEDWINDOW,
-                                x, y, formWidth, height, nullptr, nullptr, hinst, nullptr);
+    HWND hwnd = CreateWindowExW(0, L"RunMeListWnd", MakeListTitle(0).c_str(), WS_OVERLAPPEDWINDOW,
+                                x, y, listWidth, height, nullptr, nullptr, hinst, nullptr);
     if (!hwnd) return;
 
     g_listBoxWnd = CreateWindowExW(
         0, L"ListBox", L"",
         WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_TABSTOP | LBS_NOTIFY | LBS_HASSTRINGS | LBS_OWNERDRAWFIXED,
-        0, 0, formWidth, height, hwnd, (HMENU)1, hinst, nullptr);
+        0, 0, listWidth, height, hwnd, (HMENU)1, hinst, nullptr);
     if (!g_listBoxWnd)
     {
         DestroyWindow(hwnd);
@@ -1487,6 +1631,10 @@ static void ShowListBox()
     SendMessageW(g_listBoxWnd, LB_SETCURSEL, 0, 0);      // 默认选中第一项
     SendMessageW(g_listBoxWnd, LB_SETCARETINDEX, 0, FALSE);
 
+    // 倒计时：到点自动启动当前选中项（用户一旦操作即取消，见 ListCancelCountdown）
+    if (g_listAutoRunSeconds > 0)
+        SetTimer(hwnd, kListTimerId, 1000, nullptr);
+
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
     SetFocus(g_listBoxWnd);
@@ -1499,6 +1647,7 @@ static void ShowListBox()
     }
 
     g_listBoxWnd = nullptr;
+    g_listCountdownLeft = 0;
     if (font) DeleteObject(font);
 }
 
@@ -1556,11 +1705,13 @@ static void ShowMessage()
         L"  · {0}{1}…                            带参数运行分身（如拖拽文件到 exe 上）时自动填入",
         L"  · 路径                               绝对路径直接运行；相对路径支持 pf\\、pf86\\、AppData、..\\ 前缀，其余按基准目录拼接",
         L"",
-        L"列表窗口：Enter 启动 / Shift+Enter 管理员启动 / 双击启动 / 滚轮切换 / Esc 关闭",
+        L"列表窗口：Enter 启动 / Shift+Enter 管理员启动 / 双击启动 / 滚轮切换 / 方向键循环 / Esc 关闭",
+        L"          倒计时到点自动启动当前选中项（标题栏显示剩余秒数；按键/滚轮/点击即取消）",
         L"",
         L"批量启动：新建 {分身名}run.txt（如 Vsrun.txt），每行一个目标，双击分身按行依次启动",
         L"",
-        L"配置：[Settings] RunParentDirectory=相对路径基准目录；ExcludeExeName=list 模式的排除名单",
+        L"配置：[Settings] RunParentDirectory=相对路径基准目录；ExcludeExeName=list 模式的排除名单；",
+        L"      ListAutoRunSeconds=列表窗口倒计时秒数（默认 5，0=不自动启动）",
         L"",
         L"其他命令（命令行传递）：",
         L"  runme 显示名|目标,…    临时列表（单条直接启动，多条弹列表）",
@@ -1623,6 +1774,14 @@ int APIENTRY wWinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPWSTR, _In_ int)
 
     ReadValue(L"Settings", L"RunParentDirectory", g_parentDir);
     if (g_parentDir.empty() || g_exeDir.empty()) return 0;
+
+    // 列表窗口倒计时秒数（[Settings] ListAutoRunSeconds，缺省 5 秒；0 = 不自动启动）
+    std::wstring autoRunSeconds;
+    if (ReadValue(L"Settings", L"ListAutoRunSeconds", autoRunSeconds))
+    {
+        int seconds = ParseIntOrDefault(autoRunSeconds, g_listAutoRunSeconds);
+        g_listAutoRunSeconds = seconds > 0 ? seconds : 0;
+    }
 
     // 命令行参数（argv[0] 为 exe 路径）
     int argc = 0;

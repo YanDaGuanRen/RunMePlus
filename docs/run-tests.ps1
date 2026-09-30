@@ -150,6 +150,8 @@ $ini = @"
 [Settings]
 RunParentDirectory=$sandbox
 ExcludeExeName=RunMe|MeRun
+# countdown off: this suite must keep the window open and drive the list deterministically
+ListAutoRunSeconds=0
 
 [Config]
 RunMe=$cmd /c echo noargs>$sandbox\noargs.txt
@@ -287,7 +289,7 @@ $exited22 = $p22.WaitForExit(10000)
 $iniPath22 = Join-Path $fresh 'YanBinCfg.ini'
 $text22 = ''
 if (Test-Path $iniPath22) { $text22 = Get-Content $iniPath22 -Raw }
-$ok22 = $exited22 -and (Test-Path $iniPath22) -and ($text22.Contains('[Config]')) -and ($text22.Contains('runadmin')) -and ($text22.Contains('RunParentDirectory')) -and ($text22.Contains('{time.')) -and ($text22.Contains('runmeth'))
+$ok22 = $exited22 -and (Test-Path $iniPath22) -and ($text22.Contains('[Config]')) -and ($text22.Contains('runadmin')) -and ($text22.Contains('RunParentDirectory')) -and ($text22.Contains('{time.')) -and ($text22.Contains('runmeth')) -and ($text22.Contains('ListAutoRunSeconds=5'))
 Add-Result 'first run generates annotated default config' $ok22
 
 # 23/24/25) run list items with cmd/ps prefixed targets by moving selection down and pressing Enter

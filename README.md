@@ -4,6 +4,8 @@ RunMe 启动器的 **C++/Win32 单文件实现**（对照上级目录的 C# 版 
 
 编译产物为无运行时依赖的独立 exe（x64、`/MT` 静态链接、Unicode）。
 
+> 与 C# 版的差异：列表窗口的“倒计时自动启动”与“方向键循环切换”为 C++ 版新增，C# 版无此行为；其余语义一致。
+
 ## 构建
 
 - Visual Studio：打开 `RunMeCpp.sln`，选 **Debug/Release × x64/Win32** 任一组合生成
@@ -31,7 +33,9 @@ msbuild RunMeCpp.sln /p:Configuration=Release /p:Platform=Win32   # 32 位
 - **占位符**：`{time.格式}`（.NET 风格常用子集）、`{env.变量名}`、`{guid.id}`、`{random.最小-最大}`，以及 `{0}{1}…` 命令行参数填充
 - **路径解析**：绝对路径直接运行；相对路径支持 `pf\`、`pf86\`、`AppData`、`..\` 前缀，其余以 `[Settings] RunParentDirectory` 为基准拼接
 - **runme 列表窗口**：值以 `runme ` 开头 + `显示名|目标,…`；单条直接启动，多条弹 Win32 列表窗口
-  （Enter 启动 / Shift+Enter 管理员启动 / 双击启动 / 滚轮循环切换 / Esc 关闭）
+  （Enter 启动 / Shift+Enter 管理员启动 / 双击启动 / 滚轮循环切换 / 方向键循环切换（末项↓回首项、首项↑跳末项）/ Esc 关闭）
+- **列表窗口倒计时**：`[Settings] ListAutoRunSeconds` 秒（默认 5）内无操作，则自动启动当前选中项（未操作时即默认第一项）；
+  标题栏显示剩余秒数，窗口宽度会按标题自动撑宽；用户一旦按键 / 滚轮 / 点击即取消倒计时，不再自动启动（设 0 = 完全关闭自动启动）
 - **批量启动**：`{分身名}run.txt` 每行一个目标，首行立即、之后每行间隔 1 秒依次启动
 - **命令行命令**：`help`、`list 扩展名 [目录]`、`runme 显示名|目标,…`、`runmeth`（其它 exe 全部替换为自身）、`runmefth`（按 `[Config]` 键批量生成分身）
 
@@ -46,13 +50,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File docs\run-tests.ps1
 
 当前结果：**29 / 29 通过**（Release x64，零编译警告）。
 
-`docs\run-tests-extra.ps1` 为扩展测试（列表窗口双击/滚轮、`AppData`/`pf\`/尾斜杠 `..\` 路径前缀、`{time.*}`/`{random.*}` 格式）：
+`docs\run-tests-extra.ps1` 为扩展测试（列表窗口双击/滚轮、列表倒计时自动启动/可关闭/操作取消、方向键循环、窗口宽度自适应、`AppData`/`pf\`/尾斜杠 `..\` 路径前缀、`{time.*}`/`{random.*}` 格式）：
 
 ```
 powershell -NoProfile -ExecutionPolicy Bypass -File docs\run-tests-extra.ps1
 ```
 
-当前结果：**6 / 6 通过**。
+当前结果：**13 / 13 通过**。
 
 两个脚本均支持 `-Exe <路径>` 指定被测 exe（如测 32 位版：`-Exe bin\Win32\Release\RunMeCpp.exe`）。
 
